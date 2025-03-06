@@ -21,6 +21,7 @@ use arrow::array::{
     Array, ArrayRef, AsArray, Decimal128Array, Int32Array, Int64Array, PrimitiveArray, RecordBatch,
     StructArray, TimestampNanosecondBuilder,
 };
+use arrow::compute::cast;
 use arrow::datatypes::{
     ArrowPrimitiveType, DataType, Field, Int16Type, Int32Type, Int64Type, Int8Type, Schema,
     SchemaRef, TimeUnit,
@@ -224,24 +225,14 @@ pub fn snowflake_schema_cast(record_batch: &RecordBatch) -> Result<RecordBatch, 
                         DataType::Decimal128(_, _) | DataType::Decimal256(_, _)
                     ) =>
                 {
-                    if let (Some(precision_str), Some(scale_str)) =
-                        (field_metadata.get("precision"), field_metadata.get("scale"))
-                    {
-                        if let (Ok(precision), Ok(scale)) =
-                            (precision_str.parse::<u8>(), scale_str.parse::<i8>())
-                        {
-                            fields.push(Arc::new(Field::new(
-                                field.name(),
-                                DataType::Decimal128(precision, scale),
-                                field.is_nullable(),
-                            )));
+                    fields.push(Arc::new(Field::new(
+                        field.name(),
+                        DataType::Int64,
+                        field.is_nullable(),
+                    )));
 
-                            columns.push(cast_sf_fixed_point_number_to_decimal(
-                                column, precision, scale,
-                            )?);
-                            continue;
-                        }
-                    }
+                    columns.push(cast_sf_fixed_point_number_to_integer(column)?);
+                    continue;
                 }
                 _ => {}
             }
@@ -309,6 +300,7 @@ fn cast_sf_timestamp_to_arrow_timestamp(column: &ArrayRef, is_tz: bool) -> Resul
     Ok(Arc::new(timestamp_array) as ArrayRef)
 }
 
+#[allow(dead_code)]
 fn cast_sf_fixed_point_number_to_decimal(
     array: &ArrayRef,
     precision: u8,
@@ -337,6 +329,22 @@ fn cast_sf_fixed_point_number_to_decimal(
     Ok(decimal_array)
 }
 
+fn cast_sf_fixed_point_number_to_integer(array: &ArrayRef) -> Result<ArrayRef, Error> {
+    let data_type = array.data_type();
+    let integer_array = match array.data_type() {
+        DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
+            cast(array, &DataType::Int64)
+        }
+        _ => Err(ArrowError::CastError(format!(
+            "Casting from {data_type:?} is not supported"
+        ))),
+    }
+    .context(UnableToCastSnowflakeNumericToDecimalSnafu)?;
+
+    Ok(integer_array)
+}
+
+#[allow(dead_code)]
 fn cast_integer_to_decimal<T: ArrowPrimitiveType>(
     array: &PrimitiveArray<T>,
     precision: u8,
@@ -369,11 +377,7 @@ fn parse_snowflake_data_type(data_type_str: &str) -> Result<DataType, Error> {
         })?;
 
     match data_type["type"].as_str() {
-        Some("FIXED") => {
-            let precision = data_type["precision"].as_u64().unwrap_or(38) as u8;
-            let scale = data_type["scale"].as_i64().unwrap_or(0) as i8;
-            Ok(DataType::Decimal128(precision, scale))
-        }
+        Some("FIXED") => Ok(DataType::Int64),
         Some("TEXT" | "VARIANT" | "ARRAY") => Ok(DataType::Utf8),
         Some("REAL") => Ok(DataType::Float64),
         Some("BINARY") => Ok(DataType::Binary),
